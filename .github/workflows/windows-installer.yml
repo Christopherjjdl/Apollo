@@ -83,7 +83,8 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
-          cmake --build build --config ${BUILD_TYPE}
+          # -k 0: report every compile error in one run, not just the first.
+          cmake --build build --config ${BUILD_TYPE} -- -k 0
 
       - name: Package installer
         shell: msys2 {0}
