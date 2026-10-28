@@ -1,0 +1,118 @@
+# Builds the Windows NSIS installer for this patched branch and uploads it as a
+# workflow artifact. Adapted from the release workflow in ClassicOldSong/Apollo
+# PR #1497, without its GitHub Release step.
+name: Windows installer
+
+on:
+  push:
+    branches:
+      - "v0.4.6-patched"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  # The version the build reports; the commit in Apollo's log tells this build apart.
+  PACKAGE_VERSION: v0.4.6
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-nlohmann_json
+
+      - name: Verify toolchain
+        shell: msys2 {0}
+        run: |
+          gcc --version | head -1
+          cmake --version | head -1
+          ninja --version
+          npm --version
+
+      - name: Configure
+        shell: msys2 {0}
+        env:
+          BRANCH: ${{ github.ref_name }}
+          BUILD_VERSION: ${{ env.PACKAGE_VERSION }}
+          CLONE_URL: ${{ github.server_url }}/${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          TAG: ${{ env.PACKAGE_VERSION }}
+        run: |
+          cmake -B build -G Ninja -S . -DCMAKE_BUILD_TYPE=${BUILD_TYPE}
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake --build build --config ${BUILD_TYPE}
+
+      - name: Package installer
+        shell: msys2 {0}
+        run: |
+          cpack -G NSIS --config ./build/CPackConfig.cmake
+
+      - name: Collect installer
+        id: collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $installer = Get-ChildItem -Path build -Recurse -Filter '*.exe' |
+            Where-Object { $_.FullName -match 'cpack_artifacts|_CPack_Packages' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'No NSIS installer was produced by CPack.'
+          }
+          $short = "${{ github.sha }}".Substring(0, 8)
+          $assetPath = "dist/Apollo-0.4.6-patched-$short.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $assetPath -Force
+          (Get-FileHash $assetPath -Algorithm SHA256).Hash | Tee-Object -FilePath "$assetPath.sha256"
+          "asset_path=$assetPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Apollo-0.4.6-patched-windows-installer
+          path: |
+            ${{ steps.collect.outputs.asset_path }}
+            ${{ steps.collect.outputs.asset_path }}.sha256
+          if-no-files-found: error
